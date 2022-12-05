@@ -412,6 +412,11 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 ssize_t __vfs_read(struct file *file, char __user *buf, size_t count,
 		   loff_t *pos)
 {
+	struct address_space *mapping = file->f_mapping;
+	struct inode *inode=mapping->host;
+	if(inode){
+		inode->i_read_time++;		
+	}
 	if (file->f_op->read)
 		return file->f_op->read(file, buf, count, pos);
 	else if (file->f_op->read_iter)
@@ -483,6 +488,11 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 ssize_t __vfs_write(struct file *file, const char __user *p, size_t count,
 		    loff_t *pos)
 {
+	struct address_space *mapping = file->f_mapping;
+	struct inode *inode=mapping->host;
+	if(inode){
+		inode->i_write_time++;		
+	}
 	if (file->f_op->write)
 		return file->f_op->write(file, p, count, pos);
 	else if (file->f_op->write_iter)

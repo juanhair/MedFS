@@ -222,7 +222,8 @@ static struct inode *alloc_inode(struct super_block *sb)
 			kmem_cache_free(inode_cachep, inode);
 		return NULL;
 	}
-
+	inode->i_read_time=0;
+	inode->i_write_time=0;
 	return inode;
 }
 

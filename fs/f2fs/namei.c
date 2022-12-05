@@ -22,7 +22,7 @@
 #include "acl.h"
 #include <trace/events/f2fs.h>
 
-static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
+struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
 	nid_t ino;
@@ -34,7 +34,12 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	inode = new_inode(dir->i_sb);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-
+#ifdef F2FS_DELTA_COMPRESS
+	if (!f2fs_alloc_nid(sbi, &ino)) {
+		err = -ENOSPC;
+		goto fail;
+	}
+#else
 	f2fs_lock_op(sbi);
 	if (!f2fs_alloc_nid(sbi, &ino)) {
 		f2fs_unlock_op(sbi);
@@ -42,7 +47,7 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 		goto fail;
 	}
 	f2fs_unlock_op(sbi);
-
+#endif
 	nid_free = true;
 
 	inode_init_owner(inode, dir, mode);

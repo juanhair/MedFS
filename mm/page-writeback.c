@@ -2652,7 +2652,7 @@ int clear_page_dirty_for_io(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
 	int ret = 0;
-
+	if(!PageLocked(page)) lock_page(page);
 	BUG_ON(!PageLocked(page));
 
 	if (mapping && mapping_cap_account_dirty(mapping)) {

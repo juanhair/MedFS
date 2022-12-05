@@ -368,7 +368,11 @@ void f2fs_drop_inmem_pages(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_inode_info *fi = F2FS_I(inode);
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(inode!=NULL) {
+		f2fs_retrieve_inode_delta(inode);
+	}
+#endif
 	while (!list_empty(&fi->inmem_pages)) {
 		mutex_lock(&fi->inmem_lock);
 		__revoke_inmem_pages(inode, &fi->inmem_pages,
@@ -386,6 +390,12 @@ void f2fs_drop_inmem_pages(struct inode *inode)
 		sbi->atomic_files--;
 	}
 	spin_unlock(&sbi->inode_lock[ATOMIC_FILE]);
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 }
 
 void f2fs_drop_inmem_page(struct inode *inode, struct page *page)
@@ -433,7 +443,11 @@ static int __f2fs_commit_inmem_pages(struct inode *inode)
 	struct list_head revoke_list;
 	bool submit_bio = false;
 	int err = 0;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(inode!=NULL) {
+		f2fs_retrieve_inode_delta(inode);
+	}
+#endif
 	INIT_LIST_HEAD(&revoke_list);
 
 	list_for_each_entry_safe(cur, tmp, &fi->inmem_pages, list) {
@@ -495,7 +509,12 @@ retry:
 		__revoke_inmem_pages(inode, &revoke_list,
 						false, false, false);
 	}
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 	return err;
 }
 
@@ -3693,12 +3712,11 @@ void f2fs_outplace_write_data(struct dnode_of_data *dn,
 {
 	struct f2fs_sb_info *sbi = fio->sbi;
 	struct f2fs_summary sum;
-
+	
 	f2fs_bug_on(sbi, dn->data_blkaddr == NULL_ADDR);
 	set_summary(&sum, dn->nid, dn->ofs_in_node, fio->version);
 	do_write_page(&sum, fio);
 	f2fs_update_data_blkaddr(dn, fio->new_blkaddr);
-
 	f2fs_update_iostat(sbi, fio->io_type, F2FS_BLKSIZE);
 }
 

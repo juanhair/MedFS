@@ -451,7 +451,6 @@ int __filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
 	if (!mapping_cap_writeback_dirty(mapping) ||
 	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		return 0;
-
 	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
 	ret = do_writepages(mapping, &wbc);
 	wbc_detach_inode(&wbc);
@@ -1535,6 +1534,7 @@ struct page *find_get_entry(struct address_space *mapping, pgoff_t offset)
 	rcu_read_lock();
 repeat:
 	page = NULL;
+	
 	pagep = radix_tree_lookup_slot(&mapping->i_pages, offset);
 	if (pagep) {
 		page = radix_tree_deref_slot(pagep);
@@ -2178,7 +2178,8 @@ static ssize_t generic_file_buffered_read(struct kiocb *iocb,
 	unsigned long offset;      /* offset into pagecache page */
 	unsigned int prev_offset;
 	int error = 0;
-
+	int last_ino=0;
+	int last_pageindex=0;
 	if (unlikely(*ppos >= inode->i_sb->s_maxbytes))
 		return 0;
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
@@ -2238,8 +2239,9 @@ find_page:
 			error = wait_on_page_locked_killable(page);
 			if (unlikely(error))
 				goto readpage_error;
-			if (PageUptodate(page))
+			if (PageUptodate(page)){
 				goto page_ok;
+			}
 
 			if (inode->i_blkbits == PAGE_SHIFT ||
 					!mapping->a_ops->is_partially_uptodate)
@@ -2266,7 +2268,6 @@ page_ok:
 		 * part of the page is not copied back to userspace (unless
 		 * another truncate extends the file - this is desired though).
 		 */
-
 		isize = i_size_read(inode);
 		end_index = (isize - 1) >> PAGE_SHIFT;
 		if (unlikely(!isize || index > end_index)) {
@@ -3296,8 +3297,13 @@ ssize_t generic_perform_write(struct file *file,
 		unsigned long offset;	/* Offset into pagecache page */
 		unsigned long bytes;	/* Bytes to write to page */
 		size_t copied;		/* Bytes copied from user */
+#ifdef F2FS_DELTA_COMPRESS
+		void *fsdata=NULL;
+		int last_ino=0;
+		int last_pageindex=0;
+#else
 		void *fsdata;
-
+#endif
 #ifdef CONFIG_CGROUP_IOLIMIT
 		if (iolimit_enable)
 			io_write_bandwidth_control(PAGE_SIZE);
@@ -3338,7 +3344,19 @@ again:
 
 		copied = iov_iter_copy_from_user_atomic(page, i, offset, bytes);
 		flush_dcache_page(page);
-
+/*		unsigned char * ss, * fname;
+		fname=kmalloc(512,GFP_KERNEL);
+		ss=dentry_path_raw(file->f_path.dentry,fname,512);
+		if(last_ino!=page->mapping->host->i_ino || last_pageindex!=page->index){
+			if(strstr(ss,"/data/")!=NULL||strstr(ss,"/app/")!=NULL){
+				if(ss&&current!=NULL){
+					printk(KERN_ALERT"write page info in f2fs:%s %s %d %d %d %d %d\n",ss, file->f_path.dentry->d_name.name, page->mapping->host->i_ino, page->index, page->mapping->host->i_size, page->mapping->host->i_flags, page->mapping->host->i_mode);
+				}
+			}
+			kfree(fname);
+			last_ino=page->mapping->host->i_ino;
+			last_pageindex=page->index;
+		}*/
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
 						page, fsdata);
 		if (unlikely(status < 0))

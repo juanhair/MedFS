@@ -525,7 +525,14 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 	/* step 2: recover inline data */
 	if (f2fs_recover_inline_data(inode, page))
 		goto out;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(inode!=NULL) {
+		if(is_inode_flag_set(inode,FI_INLINE_DELTA)) {
+			f2fs_recover_inline_delta(inode, page);
+			f2fs_retrieve_inode_delta(inode);
+		}
+	}
+#endif
 	/* step 3: recover data indices */
 	start = f2fs_start_bidx_of_node(ofs_of_node(page), inode);
 	end = start + ADDRS_PER_PAGE(page, inode);

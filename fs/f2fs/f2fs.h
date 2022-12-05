@@ -26,7 +26,11 @@
 
 #include <linux/fscrypt.h>
 #include <linux/fsverity.h>
-
+#define F2FS_DELTA_COMPRESS
+#ifdef F2FS_DELTA_COMPRESS
+#define F2FS_MAIN_COMPRESS
+#define META_START_BLKNO 805306368
+#endif
 #ifdef CONFIG_F2FS_CHECK_FS
 #define f2fs_bug_on(sbi, condition)	BUG_ON(condition)
 #else
@@ -731,6 +735,14 @@ enum {
 	FI_VERITY_IN_PROGRESS,	/* building fs-verity Merkle tree */
 	FI_COMPRESSED_FILE,	/* indicate file's data can be compressed */
 	FI_MMAP_FILE,		/* indicate file was mmapped */
+#ifdef F2FS_DELTA_COMPRESS
+	FI_INLINE_DELTA,	/* indicate file has inline delta*/
+	FI_DELTA_TRUNCATING,	/* indicate file has truncating delta*/
+	FI_FINISH_TRUNCATE,	/* indicate file finished truncating delta*/
+#ifdef F2FS_MAIN_COMPRESS
+	FI_MAIN_DELTA,		/* indicate file has main delta*/
+#endif
+#endif
 	FI_MAX,			/* max flag, never be used */
 };
 
@@ -756,7 +768,6 @@ struct f2fs_inode_info {
 	struct task_struct *cp_task;	/* separate cp/wb IO stats*/
 	nid_t i_xattr_nid;		/* node id that contains xattrs */
 	loff_t	last_disk_size;		/* lastly written file size */
-
 #ifdef CONFIG_QUOTA
 	struct dquot *i_dquot[MAXQUOTAS];
 
@@ -781,7 +792,10 @@ struct f2fs_inode_info {
 	int i_inline_xattr_size;	/* inline xattr size */
 	struct timespec64 i_crtime;	/* inode creation time */
 	struct timespec64 i_disk_time[4];/* inode disk times */
-
+#ifdef F2FS_MAIN_COMPRESS
+	int meta_id;          /*index of meta block*/
+	int cpage_num;
+#endif
 	/* for file compress */
 	u64 i_compr_blocks;			/* # of compressed blocks */
 	unsigned char i_compress_algorithm;	/* algorithm type */
@@ -1400,7 +1414,9 @@ struct f2fs_sb_info {
 	struct list_head zombie_list;		/* extent zombie tree list */
 	atomic_t total_zombie_tree;		/* extent zombie tree count */
 	atomic_t total_ext_node;		/* extent info count */
-
+#ifdef F2FS_DELTA_COMPRESS
+	bool mounted;
+#endif
 	/* basic filesystem units */
 	unsigned int log_sectors_per_block;	/* log2 sectors per block */
 	unsigned int log_blocksize;		/* log2 block size */
@@ -1419,7 +1435,6 @@ struct f2fs_sb_info {
 	loff_t max_file_blocks;			/* max block index of file */
 	int dir_level;				/* directory level */
 	int readdir_ra;				/* readahead inode in readdir */
-
 	block_t user_block_count;		/* # of user blocks */
 	block_t total_valid_block_count;	/* # of valid blocks */
 	block_t discard_blks;			/* discard command candidats */
@@ -1468,7 +1483,16 @@ struct f2fs_sb_info {
 	unsigned int max_victim_search;
 	/* migration granularity of garbage collection, unit: segment */
 	unsigned int migration_granularity;
-
+	/*centroid for kmeans*/
+	float cx1;
+	float cy1;
+	float cx2;
+	float cy2;
+	float cx3;
+	float cy3;
+	float cx4;
+	float cy4;
+	unsigned long first_ino;
 	/*
 	 * for stat information.
 	 * one is for the LFS mode, and the other is for the SSR mode.
@@ -2346,7 +2370,6 @@ static inline struct page *f2fs_pagecache_get_page(
 		f2fs_show_injection_info(F2FS_M_SB(mapping), FAULT_PAGE_GET);
 		return NULL;
 	}
-
 	return pagecache_get_page(mapping, index, fgp_flags, gfp_mask);
 }
 
@@ -2544,6 +2567,12 @@ static inline void f2fs_change_bit(unsigned int nr, char *addr)
 #define F2FS_NOCOMP_FL			0x00000400 /* Don't compress */
 #define F2FS_INDEX_FL			0x00001000 /* hash-indexed directory */
 #define F2FS_DIRSYNC_FL			0x00010000 /* dirsync behaviour (directories only) */
+#ifdef F2FS_DELTA_COMPRESS
+#define F2FS_DELTA_INLINE			0x00100000 /* delta compress */
+#define F2FS_DELTA_TRUNCATING			0x00200000 /* delta truncating */
+#define F2FS_DELTA_FINISH			0x00400000 /* delta finish truncating */
+#define F2FS_DELTA_MAIN			0x00800000 /*delta main area*/
+#endif
 #define F2FS_PROJINHERIT_FL		0x20000000 /* Create with parents projid */
 #define F2FS_CASEFOLD_FL		0x40000000 /* Casefolded file */
 
@@ -3087,7 +3116,10 @@ long f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 long f2fs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 int f2fs_transfer_project_quota(struct inode *inode, kprojid_t kprojid);
 int f2fs_pin_file_control(struct inode *inode, bool inc);
-
+#ifdef F2FS_DELTA_COMPRESS
+int f2fs_file_delta_get_node_path(struct inode *inode, long block,
+				int offset[4], unsigned int noffset[4]);
+#endif
 /*
  * inode.c
  */
@@ -3109,7 +3141,7 @@ void f2fs_handle_failed_inode(struct inode *inode);
 int f2fs_update_extension_list(struct f2fs_sb_info *sbi, const char *name,
 							bool hot, bool set);
 struct dentry *f2fs_get_parent(struct dentry *child);
-
+struct inode *f2fs_new_inode(struct inode *dir, umode_t mode);
 /*
  * dir.c
  */
@@ -3344,6 +3376,25 @@ void f2fs_destroy_checkpoint_caches(void);
 /*
  * data.c
  */
+#ifdef F2FS_DELTA_COMPRESS
+int f2fs_decompress_delta(struct page *page);
+int f2fs_retrieve_delta(struct inode *inode, unsigned int ofs_in_node);
+int f2fs_retrieve_inode_delta(struct inode *inode);
+static int f2fs_delta_get_node_path(struct inode *inode, long block,
+				int offset[4], unsigned int noffset[4]);
+int f2fs_convert_inline_delta(struct dnode_of_data *dn, struct page *page);
+int f2fs_truncate_inline_delta(struct inode *inode, struct page *ipage, int from, int to, int delta_num, int delta_inline_size);
+int f2fs_decompress_delta_for_retrieve(struct page *page, char *tp, size_t dsize);
+bool f2fs_recover_inline_delta(struct inode *inode, struct page *npage);
+bool innode_data_replacement(struct file *file, struct dnode_of_data *dn, int index, char *cbuf, size_t clen, int delta_num, int delta_inline_size, char* src_addr, char *dst_addr);
+bool f2fs_decomp_evict_delta(struct dnode_of_data *dn, char *rbuf, int rlen, int index);
+
+#ifdef F2FS_MAIN_COMPRESS
+bool f2fs_store_delta_in_main(struct inode *inode,char *cbuf, int clen, block_t index, int type);
+bool f2fs_decompress_main(struct page *page);
+struct page *f2fs_read_page_for_main_compress(struct inode *inode, pgoff_t index);
+#endif
+#endif
 int __init f2fs_init_bioset(void);
 void f2fs_destroy_bioset(void);
 struct bio *f2fs_bio_alloc(struct f2fs_sb_info *sbi, int npages, bool no_fail);

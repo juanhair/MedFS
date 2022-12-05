@@ -1155,7 +1155,10 @@ static struct inode *f2fs_alloc_inode(struct super_block *sb)
 
 	/* Will be used by directory only */
 	fi->i_dir_level = F2FS_SB(sb)->dir_level;
-
+#ifdef F2FS_MAIN_COMPRESS
+	fi->meta_id=0;
+	fi->cpage_num=0;
+#endif
 	return &fi->vfs_inode;
 }
 
@@ -3179,7 +3182,6 @@ static void init_sb_info(struct f2fs_sb_info *sbi)
 	sbi->next_victim_seg[FG_GC] = NULL_SEGNO;
 	sbi->max_victim_search = DEF_MAX_VICTIM_SEARCH;
 	sbi->migration_granularity = sbi->segs_per_sec;
-
 	sbi->dir_level = DEF_DIR_LEVEL;
 	sbi->interval_time[CP_TIME] = DEF_CP_INTERVAL;
 	sbi->interval_time[REQ_TIME] = DEF_IDLE_INTERVAL;
@@ -3575,7 +3577,9 @@ try_onemore:
 	sbi = kzalloc(sizeof(struct f2fs_sb_info), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
-
+#ifdef F2FS_DELTA_COMPRESS
+	sbi->mounted = false;
+#endif
 #ifdef CONFIG_F2FS_BD_STAT
 	sbi->bd_info = kzalloc(sizeof(struct f2fs_bigdata_info), GFP_KERNEL);
 	if (!sbi->bd_info) {
@@ -3585,7 +3589,6 @@ try_onemore:
 	sbi->bd_info->ssr_last_jiffies = jiffies;
 	bd_lock_init(sbi);
 #endif
-
 	sbi->sb = sb;
 
 	/* Load the checksum driver */
@@ -3694,7 +3697,18 @@ try_onemore:
 	/* init iostat info */
 	spin_lock_init(&sbi->iostat_lock);
 	sbi->iostat_enable = false;
-
+#ifdef F2FS_MAIN_COMPRESS
+	/*init centroid for kmeans*/
+	sbi->cx1=5.9;//read cold write cold
+	sbi->cy1=2.9;
+	sbi->cx2=46.2;//read cold write hot
+	sbi->cy2=5.5;
+	sbi->cx3=3.5;//read hot write cold
+	sbi->cy3=31.1;
+	sbi->cx4=33.3;//red hot write hot
+	sbi->cy4=30.8;
+	sbi->first_ino=0;
+#endif
 	for (i = 0; i < NR_PAGE_TYPE; i++) {
 		int n = (i == META) ? 1: NR_TEMP_TYPE;
 		int j;
@@ -3957,6 +3971,9 @@ reset_checkpoint:
 
 	f2fs_notice(sbi, "Mounted with checkpoint version = %llx",
 		    cur_cp_version(F2FS_CKPT(sbi)));
+#ifdef F2FS_DELTA_COMPRESS
+	sbi->mounted = true;
+#endif
 	f2fs_update_time(sbi, CP_TIME);
 	f2fs_update_time(sbi, REQ_TIME);
 	clear_sbi_flag(sbi, SBI_CP_DISABLED_QUICK);

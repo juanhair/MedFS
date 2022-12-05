@@ -10,7 +10,10 @@
 
 #include <linux/pagemap.h>
 #include <linux/types.h>
-
+#define F2FS_DELTA_COMPRESS  //revised
+#ifdef F2FS_DELTA_COMPRESS
+#define F2FS_MAIN_COMPRESS
+#endif
 #define F2FS_SUPER_OFFSET		1024	/* byte-size offset */
 #define F2FS_MIN_LOG_SECTOR_SIZE	9	/* 9 bits for 512 bytes */
 #define F2FS_MAX_LOG_SECTOR_SIZE	12	/* 12 bits for 4096 bytes */

@@ -666,8 +666,10 @@ void f2fs_truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 
 		if (__is_valid_data_blkaddr(blkaddr)) {
 			if (!f2fs_is_valid_blkaddr(sbi, blkaddr,
-					DATA_GENERIC_ENHANCE))
+					DATA_GENERIC_ENHANCE)){
+				printk(KERN_ALERT"invalid f2fs blkaddr in truncate:%d %d %d\n",dn->inode->i_ino,dn->ofs_in_node, blkaddr);
 				continue;
+			}
 			if (compressed_cluster)
 				valid_blocks++;
 		}
@@ -832,7 +834,11 @@ int f2fs_truncate_blocks(struct inode *inode, u64 from, bool lock)
 int f2fs_truncate(struct inode *inode)
 {
 	int err;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode,FI_INLINE_DELTA) && !is_inode_flag_set(inode,FI_DELTA_TRUNCATING)) {
+		f2fs_retrieve_inode_delta(inode);	
+	}
+#endif
 	if (unlikely(f2fs_cp_error(F2FS_I_SB(inode))))
 		return -EIO;
 
@@ -860,6 +866,12 @@ int f2fs_truncate(struct inode *inode)
 
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 	f2fs_mark_inode_dirty_sync(inode, false);
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 	return 0;
 }
 
@@ -1180,7 +1192,11 @@ static int __read_out_blkaddrs(struct inode *inode, block_t *blkaddr,
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct dnode_of_data dn;
 	int ret, done, i;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(inode!=NULL){
+		f2fs_retrieve_inode_delta(inode);
+	}
+#endif
 next_dnode:
 	set_new_dnode(&dn, inode, NULL, NULL, 0);
 	ret = f2fs_get_dnode_of_data(&dn, off, LOOKUP_NODE_RA);
@@ -1227,6 +1243,12 @@ next:
 	off += done;
 	if (len)
 		goto next_dnode;
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 	return 0;
 }
 
@@ -1236,7 +1258,11 @@ static int __roll_back_blkaddrs(struct inode *inode, block_t *blkaddr,
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct dnode_of_data dn;
 	int ret, i;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(inode!=NULL){
+		f2fs_retrieve_inode_delta(inode);
+	}
+#endif
 	for (i = 0; i < len; i++, do_replace++, blkaddr++) {
 		if (*do_replace == 0)
 			continue;
@@ -1251,6 +1277,12 @@ static int __roll_back_blkaddrs(struct inode *inode, block_t *blkaddr,
 		}
 		f2fs_put_dnode(&dn);
 	}
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 	return 0;
 }
 

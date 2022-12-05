@@ -354,7 +354,17 @@ static int do_read_inode(struct inode *inode)
 		set_page_dirty(node_page);
 
 	get_inline_info(inode, ri);
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(fi->i_flags & F2FS_DELTA_INLINE == F2FS_DELTA_INLINE){
+		if(!is_inode_flag_set(inode,FI_INLINE_DELTA)) set_inode_flag(inode, FI_INLINE_DELTA);
+	}
+	if(fi->i_flags & F2FS_DELTA_TRUNCATING == F2FS_DELTA_TRUNCATING){
+		if(!is_inode_flag_set(inode,FI_DELTA_TRUNCATING)) set_inode_flag(inode, FI_DELTA_TRUNCATING);
+	}
+	if(fi->i_flags & F2FS_DELTA_FINISH == F2FS_DELTA_FINISH){
+		if(!is_inode_flag_set(inode,FI_FINISH_TRUNCATE)) set_inode_flag(inode, FI_FINISH_TRUNCATE);
+	}
+#endif
 	fi->i_extra_isize = f2fs_has_extra_attr(inode) ?
 					le16_to_cpu(ri->i_extra_isize) : 0;
 
@@ -682,7 +692,11 @@ void f2fs_evict_inode(struct inode *inode)
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	nid_t xnid = F2FS_I(inode)->i_xattr_nid;
 	int err = 0;
-
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode,FI_INLINE_DELTA)) {
+		f2fs_retrieve_inode_delta(inode);
+	}
+#endif
 	/* some remained atomic pages should discarded */
 	if (f2fs_is_atomic_file(inode))
 		f2fs_drop_inmem_pages(inode);
@@ -781,6 +795,12 @@ no_delete:
 		 * In that case, f2fs_check_nid_range() is enough to give a clue.
 		 */
 	}
+#ifdef F2FS_DELTA_COMPRESS
+	if(is_inode_flag_set(inode, FI_FINISH_TRUNCATE)) {
+		clear_inode_flag(inode, FI_FINISH_TRUNCATE);
+		F2FS_I(inode)->i_flags &= ~F2FS_DELTA_FINISH;
+	}
+#endif
 out_clear:
 	fscrypt_put_encryption_info(inode);
 	fsverity_cleanup_inode(inode);

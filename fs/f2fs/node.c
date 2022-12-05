@@ -1222,17 +1222,16 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	struct node_info new_ni;
 	struct page *page;
 	int err;
-
 	if (unlikely(is_inode_flag_set(dn->inode, FI_NO_ALLOC)))
 		return ERR_PTR(-EPERM);
 
 	page = f2fs_grab_cache_page(NODE_MAPPING(sbi), dn->nid, false);
-	if (!page)
+	if (!page)	
 		return ERR_PTR(-ENOMEM);
 
 	if (unlikely((err = inc_valid_node_count(sbi, dn->inode, !ofs))))
 		goto fail;
-
+	
 #ifdef CONFIG_F2FS_CHECK_FS
 	err = f2fs_get_node_info(sbi, dn->nid, &new_ni);
 	if (err) {
@@ -1247,7 +1246,6 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	new_ni.flag = 0;
 	new_ni.version = 0;
 	set_node_addr(sbi, &new_ni, NEW_ADDR, false);
-
 	f2fs_wait_on_page_writeback(page, NODE, true, true);
 	fill_node_footer(page, dn->nid, dn->inode->i_ino, ofs, true);
 	set_cold_node(page, S_ISDIR(dn->inode->i_mode));
@@ -1262,7 +1260,6 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	if (ofs == 0)
 		inc_valid_inode_count(sbi);
 	return page;
-
 fail:
 	clear_node_page_dirty(page);
 	f2fs_put_page(page, 1);

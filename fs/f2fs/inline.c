@@ -26,8 +26,11 @@ bool f2fs_may_inline_data(struct inode *inode)
 
 	if (f2fs_post_read_required(inode))
 		return false;
-
+#ifdef F2FS_DELTA_COMPRESS
+	return false;
+#else
 	return true;
+#endif
 }
 
 bool f2fs_may_inline_dentry(struct inode *inode)
@@ -38,7 +41,11 @@ bool f2fs_may_inline_dentry(struct inode *inode)
 	if (!S_ISDIR(inode->i_mode))
 		return false;
 
+#ifdef F2FS_DELTA_COMPRESS
+	return false;
+#else
 	return true;
+#endif
 }
 
 void f2fs_do_read_inline_data(struct page *page, struct page *ipage)
