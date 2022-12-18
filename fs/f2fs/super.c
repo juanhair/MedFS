@@ -1156,8 +1156,20 @@ static struct inode *f2fs_alloc_inode(struct super_block *sb)
 	/* Will be used by directory only */
 	fi->i_dir_level = F2FS_SB(sb)->dir_level;
 #ifdef F2FS_MAIN_COMPRESS
-	fi->meta_id=0;
+	fi->meta_id=-1;
 	fi->cpage_num=0;
+	fi->next_ino=-1;
+#ifdef F2FS_MAIN_BGRES
+	fi->centroid = kzalloc(sizeof(struct bgres_centroid), GFP_KERNEL);
+	if (!fi->centroid)
+		return NULL;
+	fi->centroid->ino=-1;
+	fi->ori_ino=-1;
+	fi->centroid->label=-1;
+	fi->centroid->main_compress_num=0;
+	fi->centroid->i_read_time=0;
+	fi->centroid->i_write_time=0;
+#endif
 #endif
 	return &fi->vfs_inode;
 }
@@ -3707,7 +3719,9 @@ try_onemore:
 	sbi->cy3=31.1;
 	sbi->cx4=33.3;//red hot write hot
 	sbi->cy4=30.8;
-	sbi->first_ino=0;
+	INIT_LIST_HEAD(&sbi->bgres_list);
+	spin_lock_init(&sbi->bgres_list_lock);
+	sbi->first_ino=-1;
 #endif
 	for (i = 0; i < NR_PAGE_TYPE; i++) {
 		int n = (i == META) ? 1: NR_TEMP_TYPE;

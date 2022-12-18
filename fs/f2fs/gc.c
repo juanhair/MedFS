@@ -283,9 +283,12 @@ do_gc:
 
 		trace_f2fs_background_gc(sbi->sb, wait_ms,
 				prefree_segments(sbi), free_segments(sbi));
-
+#ifdef F2FS_MAIN_BGRES
+		f2fs_decompress_bgres(sbi);
+#endif
 		/* balancing f2fs's metadata periodically */
 		f2fs_balance_fs_bg(sbi);
+
 next:
 		sb_end_write(sbi->sb);
 
@@ -293,7 +296,411 @@ next:
 	f2fs_printk(sbi, KERN_INFO "Debug:%s:gc_opt_return", __func__);
 	return 0;
 }
+#ifdef F2FS_MAIN_BGRES
+void f2fs_decompress_bgres(struct f2fs_sb_info *sbi)
+{
+	int tmp_ino, last_ino, compress_num=0;
+	struct inode *tmp_inode, *last_node;
+	struct bgres_centroid *centroid, *last_centroid;
+	if(sbi==NULL) return ;
+	if(sbi->bgres_lock==1){
+		return ;
+	}	
+	if(sbi->first_ino<0) return ;
+	f2fs_kmeans_bgres(sbi);
+	spin_lock(&sbi->bgres_list_lock);
+	list_for_each_entry(centroid, &sbi->bgres_list, bgres_inode_list) {
+		if(sbi->bgres_lock==1){
+			spin_unlock(&sbi->bgres_list_lock);
+			return ;
+		}
+		if(centroid!=NULL && centroid->ino>=0 && f2fs_check_nid_range(sbi, centroid->ino))
+			tmp_ino=centroid->ino;
+		else
+			tmp_ino=f2fs_restore_centroid(sbi, last_centroid, last_ino);
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_decompress_bgres:%d\n", tmp_inode->i_ino);
+			continue;
+		}	
+		if(F2FS_I(tmp_inode)->centroid->label!=2 || F2FS_I(tmp_inode)->centroid->main_compress_num<5)
+		{
+			f2fs_bgres_decompress(tmp_inode);
+			f2fs_del_inode_in_mainlist(sbi, tmp_ino);
+			f2fs_truncate(tmp_inode);
+			sbi->sb->s_op->destroy_inode(tmp_inode);
+			list_del(&centroid->bgres_inode_list);
+			/*del inode from list*/
+			continue;
+		}
+		last_ino=tmp_ino;
+		last_centroid=centroid;
+	}
+	spin_unlock(&sbi->bgres_list_lock);
+}
+void f2fs_del_inode_in_mainlist(struct f2fs_sb_info *sbi, int ino)
+{
+	int tmp_ino=sbi->first_ino;
+	struct inode *tmp_inode, *next_inode;
+	if(ino==sbi->first_ino)	{//first inode
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			printk(KERN_ALERT"bad inode in del mainlinst:%d\n", tmp_inode->i_ino);
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+		}
+		if(F2FS_I(tmp_inode)->next_ino>=0) {
+			sbi->first_ino=F2FS_I(tmp_inode)->next_ino;
+		}
+		else
+		{
+			printk(KERN_ALERT"no inode in bgres list\n");
+		}
+	}
+	else
+	{
+		while(tmp_ino!=ino){
+			tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+			if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+				set_sbi_flag(sbi, SBI_NEED_FSCK);
+				printk(KERN_ALERT"bad inode in f2fs_del_inode_in_mainlist1:%d\n", tmp_inode->i_ino);
+			}
+			tmp_ino=F2FS_I(tmp_inode)->next_ino;
+		}
+		next_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(next_inode) || is_bad_inode(next_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_del_inode_in_mainlist2:%d\n", next_inode->i_ino);
+		}
+		if(F2FS_I(next_inode)->next_ino<0){//last inode
+			F2FS_I(tmp_inode)->next_ino=-1;
+		}
+		else
+		{
+			F2FS_I(tmp_inode)->next_ino=F2FS_I(next_inode)->next_ino;
+		}
+	}
+}
+void f2fs_bgres_decompress(struct inode *inode)
+{
+	int i, j, k, next_loc, next_loc1, cpage_index, delta_num_in_cpage, delta_size,err=0;
+	block_t delta_index;
+	unsigned char ff1, ff4, ff5, ff6, ff7, ff8, ff9, ff10, ff11, ff12, ff13;
+	char *meta_addr=NULL, *tp=NULL, *cpage_addr=NULL, *tp1=NULL, *tp2=NULL;
+	struct page *meta_page, *cpage, *ori_page;
 
+	struct inode *ori_inode=f2fs_iget(F2FS_I_SB(inode)->sb, F2FS_I(inode)->ori_ino);
+	if (IS_ERR(ori_inode) || is_bad_inode(ori_inode)) {
+		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
+		printk(KERN_ALERT"bad inode in f2fs_bgres_decompress:%d\n", inode->i_ino);
+		return ;
+	}
+	meta_page= f2fs_read_page_for_main_compress(inode, 0);
+	if(meta_page==NULL) {
+		printk(KERN_ALERT"read meta page failed\n");
+		return ;
+	}
+	wait_on_page_writeback(meta_page);
+	tp=kmap(meta_page);
+	meta_addr=kmalloc(PAGE_SIZE,GFP_NOFS);
+	memcpy(meta_addr,tp,PAGE_SIZE);
+	kunmap(meta_page);
+	if(PageLocked(meta_page)) f2fs_put_page(meta_page,1);
+	else put_page(meta_page);
+	next_loc=0;
+	for(i=0;i<F2FS_I(inode)->cpage_num;i++){
+		ff7=meta_addr[next_loc+6];
+		ff6=meta_addr[next_loc+5];
+		ff5=meta_addr[next_loc+4];
+		ff4=meta_addr[next_loc+3];
+		cpage_index=ff7;
+		cpage_index=(cpage_index<< BITS_PER_BYTE) | ff6;
+		cpage_index=(cpage_index<< BITS_PER_BYTE) | ff5;
+		cpage_index=(cpage_index<< BITS_PER_BYTE) | ff4;
+		cpage=f2fs_read_page_for_main_compress(inode, i+1);
+		ff1=meta_addr[next_loc];
+		delta_num_in_cpage=ff1;
+		if(cpage==NULL) {
+			printk(KERN_ALERT"read cpage failed\n");
+			return ;
+		}	
+		wait_on_page_writeback(cpage);
+		cpage_addr=kmalloc(PAGE_SIZE,GFP_NOFS);
+		tp1=kmap(cpage);
+		memcpy(cpage_addr,tp1,PAGE_SIZE);
+		kunmap(cpage);
+		if(PageLocked(cpage)) f2fs_put_page(cpage,1);
+		else put_page(cpage);
+		next_loc1=0;
+		for(j=0;j<delta_num_in_cpage;j++){//for each delta
+			ff12=cpage_addr[next_loc1];
+			ff13=cpage_addr[next_loc1+1];
+			delta_size=ff13;
+			delta_size=(delta_size << BITS_PER_BYTE) | ff12;
+			ff11=meta_addr[next_loc+10+j*4];
+			ff10=meta_addr[next_loc+9+j*4];
+			ff9=meta_addr[next_loc+8+j*4];
+			ff8=meta_addr[next_loc+7+j*4];
+			delta_index=ff11;
+			delta_index=(delta_index<< BITS_PER_BYTE) | ff10;
+			delta_index=(delta_index<< BITS_PER_BYTE) | ff9;
+			delta_index=(delta_index<< BITS_PER_BYTE) | ff8;
+wait_unlock:
+			ori_page=f2fs_read_page_for_main_compress(ori_inode, delta_index);
+			if(ori_page==NULL){
+				printk(KERN_ALERT"error read base in bgres%d %d\n", ori_inode->i_ino, delta_index);
+				return ;
+			}
+			tp2=kmalloc(delta_size,GFP_NOFS);
+			for(k=0;k<delta_size;k++) tp2[k]=cpage_addr[next_loc1+2+k];
+			err=f2fs_decompress_delta_for_retrieve(ori_page, tp2, delta_size);
+			if (err){
+				printk(KERN_ALERT"decompress failed in bgres\n");
+				if(PageLocked(ori_page)) f2fs_put_page(ori_page, 1);	
+				else put_page(ori_page);
+				kfree(tp2);	
+				congestion_wait(BLK_RW_ASYNC, HZ/50);
+				goto wait_unlock;
+			}
+			kfree(tp2);
+			set_page_dirty(ori_page);	
+			if(PageLocked(ori_page)) f2fs_put_page(ori_page, 1);	
+			else put_page(ori_page);		
+		}	
+
+		kfree(cpage_addr);	
+		next_loc=next_loc+2+1+4+4*delta_num_in_cpage;
+	}	
+	kfree(meta_addr);	
+	return ;
+}
+void f2fs_kmeans_bgres(struct f2fs_sb_info *sbi)
+{
+	double todist=0.0, last_todist=0.0;
+	if(sbi->first_ino<0) return ;
+	if(sbi->bgres_lock==1){
+		return ;
+	}
+	todist=f2fs_kmeans_bgres_each(sbi);
+	while(last_todist!=todist) {
+		last_todist=todist;
+		todist=f2fs_kmeans_bgres_each(sbi);
+	}
+	return ;
+}
+void f2fs_cluster_bgres(struct f2fs_sb_info *sbi)
+{
+	int tmp_ino, last_ino;
+	double min_dist=1000000.0;
+	double dist1=0.0,dist2=0.0,dist3=0.0,dist4=0.0;
+	double write_time, read_time, cx1, cx2, cx3, cx4, cy1, cy2, cy3, cy4;
+	struct bgres_centroid *centroid=NULL, *last_centroid;
+	struct inode *tmp_inode, *last_inode;
+	if(sbi->bgres_lock==1){
+		return ;
+	}	
+	if(sbi->first_ino<0) return ;
+	spin_lock(&sbi->bgres_list_lock);
+	list_for_each_entry(centroid, &sbi->bgres_list, bgres_inode_list) {
+		if(sbi->bgres_lock==1){
+			spin_unlock(&sbi->bgres_list_lock);
+			return ;
+		}	
+		if(centroid!=NULL && centroid->ino>=0 && f2fs_check_nid_range(sbi, centroid->ino))
+			tmp_ino=centroid->ino;
+		else
+			tmp_ino=f2fs_restore_centroid(sbi, last_centroid, last_ino);
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_cluster_bgres:%d\n", tmp_inode->i_ino);
+			continue;
+		}
+		write_time=(double) centroid->i_write_time;
+		read_time=(double) centroid->i_read_time;
+		cx1=sbi->cx1;
+		cx2=sbi->cx2;
+		cx3=sbi->cx3;
+		cx4=sbi->cx4;
+		cy1=sbi->cy1;
+		cy2=sbi->cy2;
+		cy3=sbi->cy3;
+		cy4=sbi->cy4;
+		dist1=int_sqrt((write_time-cx1)*(write_time-cx1)+(read_time-cy1)*(read_time-cy1));
+		dist2=int_sqrt((write_time-cx2)*(write_time-cx2)+(read_time-cy2)*(read_time-cy2));
+		dist3=int_sqrt((write_time-cx3)*(write_time-cx3)+(read_time-cy3)*(read_time-cy3));
+		dist4=int_sqrt((write_time-cx4)*(write_time-cx4)+(read_time-cy4)*(read_time-cy4));
+		if(min_dist>dist1) {//read cold write cold
+			min_dist=dist1;
+			F2FS_I(tmp_inode)->centroid->label=1;
+		}
+		if(min_dist>dist2) {//read cold write hot
+			min_dist=dist2;
+			F2FS_I(tmp_inode)->centroid->label=2;
+		}
+		if(min_dist>dist3) {//read hot write cold
+			min_dist=dist3;
+			F2FS_I(tmp_inode)->centroid->label=3;
+		}
+		if(min_dist>dist4) {//red hot write hot
+			min_dist=dist4;
+			F2FS_I(tmp_inode)->centroid->label=4;
+		}
+		last_ino=tmp_ino;
+		last_centroid=centroid;
+	}
+	spin_unlock(&sbi->bgres_list_lock);	
+}
+void f2fs_update_centroid_bgres(struct f2fs_sb_info *sbi)
+{
+	int tmp_ino, last_ino, clust1=0, clust2=0, clust3=0, clust4=0;
+	double clust1_x=0.0, clust1_y=0.0,clust2_x=0.0, clust2_y=0.0,clust3_x=0.0, clust3_y=0.0,clust4_x=0.0, clust4_y=0.0;
+	struct inode *tmp_inode, *last_inode;
+	struct bgres_centroid *centroid, *last_centroid;
+	/*update centroid*/
+	if(sbi->bgres_lock==1){
+		return ;
+	}	
+	if(sbi->first_ino<0) return ;
+	spin_lock(&sbi->bgres_list_lock);
+	list_for_each_entry(centroid, &sbi->bgres_list, bgres_inode_list) {
+		if(sbi->bgres_lock==1){
+			spin_unlock(&sbi->bgres_list_lock);
+			return ;
+		}
+		if(centroid!=NULL && centroid->ino>=0 && f2fs_check_nid_range(sbi, centroid->ino))
+			tmp_ino=centroid->ino;
+		else
+			tmp_ino=f2fs_restore_centroid(sbi, last_centroid, last_ino);
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_update_centroid_bgres:%d\n", tmp_inode->i_ino);
+			continue;
+		}
+		if(F2FS_I(tmp_inode)->centroid->label==1)
+		{
+			clust1_x+=centroid->i_write_time;
+			clust1_y+=centroid->i_read_time;
+			clust1++;
+		}
+		else if(F2FS_I(tmp_inode)->centroid->label==2)
+		{
+			clust2_x+=centroid->i_write_time;
+			clust2_y+=centroid->i_read_time;	
+			clust2++;	
+		}
+		else if(F2FS_I(tmp_inode)->centroid->label==3)
+		{
+			clust3_x+=centroid->i_write_time;
+			clust3_y+=centroid->i_read_time;
+			clust3++;		
+		}
+		else
+		{
+			clust4_x+=centroid->i_write_time;
+			clust4_y+=centroid->i_read_time;
+			clust4++;		
+		}
+		last_ino=tmp_ino;
+		last_centroid=centroid;
+	}
+	spin_unlock(&sbi->bgres_list_lock);
+	if(clust1!=0) {
+		sbi->cx1=clust1_x/clust1;
+		sbi->cy1=clust1_y/clust1;
+	}
+	if(clust2!=0) {
+		sbi->cx2=clust2_x/clust2;
+		sbi->cy2=clust2_y/clust2;
+	}
+	if(clust3!=0) {
+		sbi->cx3=clust3_x/clust3;
+		sbi->cy3=clust3_y/clust3;
+	}
+	if(clust4!=0) {
+		sbi->cx4=clust4_x/clust4;
+		sbi->cy4=clust4_y/clust4;
+	}
+}
+double f2fs_kmeans_bgres_each(struct f2fs_sb_info *sbi)
+{
+	int tmp_ino, last_ino;
+	double sdist1=0.0,sdist2=0.0,sdist3=0.0,sdist4=0.0, todist=0.0;
+	struct inode *tmp_inode, *last_inode;
+	struct bgres_centroid *centroid, *last_centroid;
+	if(sbi->bgres_lock==1){
+		return 0;
+	}
+	if(sbi->first_ino<0) return 0;
+	f2fs_cluster_bgres(sbi);
+	f2fs_update_centroid_bgres(sbi);
+	/*calc mean error*/
+	spin_lock(&sbi->bgres_list_lock);
+	list_for_each_entry(centroid, &sbi->bgres_list, bgres_inode_list) {
+		if(sbi->bgres_lock==1){
+			spin_unlock(&sbi->bgres_list_lock);
+			return 0;
+		}
+		if(centroid!=NULL && centroid->ino>=0 && f2fs_check_nid_range(sbi, centroid->ino))
+			tmp_ino=centroid->ino;
+		else
+			tmp_ino=f2fs_restore_centroid(sbi, last_centroid, last_ino);
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_kmeans_bgres_each:%d\n", tmp_inode->i_ino);
+			continue;
+		}
+		if(F2FS_I(tmp_inode)->centroid->label==1) sdist1+=int_sqrt((centroid->i_write_time-sbi->cx1)*(centroid->i_write_time-sbi->cx1)+(centroid->i_read_time-sbi->cy1)*(centroid->i_read_time-sbi->cy1));
+		if(F2FS_I(tmp_inode)->centroid->label==2) sdist2+=int_sqrt((centroid->i_write_time-sbi->cx2)*(centroid->i_write_time-sbi->cx2)+(centroid->i_read_time-sbi->cy2)*(centroid->i_read_time-sbi->cy2));
+		if(F2FS_I(tmp_inode)->centroid->label==3) sdist3+=int_sqrt((centroid->i_write_time-sbi->cx3)*(centroid->i_write_time-sbi->cx3)+(centroid->i_read_time-sbi->cy3)*(centroid->i_read_time-sbi->cy3));
+		if(F2FS_I(tmp_inode)->centroid->label==4) sdist4+=int_sqrt((centroid->i_write_time-sbi->cx4)*(centroid->i_write_time-sbi->cx4)+(centroid->i_read_time-sbi->cy4)*(centroid->i_read_time-sbi->cy4));
+		last_ino=tmp_ino;	
+		last_centroid=centroid;	
+	}	
+	spin_unlock(&sbi->bgres_list_lock);
+	todist=sdist1+sdist2+sdist3+sdist4;
+	return todist;
+}
+int f2fs_restore_centroid(struct f2fs_sb_info *sbi, struct bgres_centroid *centroid, int ino)
+{
+	struct inode *inode, *cur_inode, *next_inode;
+	int cur_ino;
+	inode=f2fs_iget(sbi->sb,ino);
+	if (IS_ERR(inode) || is_bad_inode(inode)) {
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
+		printk(KERN_ALERT"bad inode in f2fs_restore_centroid:%d\n", inode->i_ino);
+		return -1;
+	}	
+	cur_ino=F2FS_I(inode)->next_ino;
+	cur_inode=f2fs_iget(sbi->sb,cur_ino);
+	if (IS_ERR(cur_inode) || is_bad_inode(cur_inode)) {
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
+		printk(KERN_ALERT"bad inode in f2fs_restore_centroid1:%d\n", cur_inode->i_ino);
+		return -1;
+	}
+	F2FS_I(cur_inode)->centroid = kzalloc(sizeof(struct bgres_centroid), GFP_KERNEL);
+	if (!F2FS_I(cur_inode)->centroid)
+		return -1;
+	F2FS_I(cur_inode)->centroid->ino=-1;
+	F2FS_I(cur_inode)->centroid->label=-1;
+	F2FS_I(cur_inode)->centroid->main_compress_num=f2fs_recover_maincompress_num(cur_inode);
+	F2FS_I(cur_inode)->centroid->i_read_time=0;
+	F2FS_I(cur_inode)->centroid->i_write_time=0;
+	centroid->bgres_inode_list.next=&F2FS_I(cur_inode)->centroid->bgres_inode_list;
+	if(F2FS_I(cur_inode)->next_ino>=0 && f2fs_check_nid_range(sbi, F2FS_I(cur_inode)->next_ino)){
+		next_inode=f2fs_iget(sbi->sb,F2FS_I(cur_inode)->next_ino);
+		if (IS_ERR(next_inode) || is_bad_inode(next_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in f2fs_restore_centroid2:%d\n", next_inode->i_ino);
+			return -1;
+		}		
+		F2FS_I(cur_inode)->centroid->bgres_inode_list.next=&F2FS_I(next_inode)->centroid->bgres_inode_list;
+	}
+	return cur_ino;
+}
+#endif
 int f2fs_start_gc_thread(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_gc_kthread *gc_th;

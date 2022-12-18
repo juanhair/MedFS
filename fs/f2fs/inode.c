@@ -442,7 +442,14 @@ static int do_read_inode(struct inode *inode)
 			set_inode_flag(inode, FI_COMPRESSED_FILE);
 		}
 	}
-
+#ifdef F2FS_MAIN_COMPRESS
+	if (f2fs_has_extra_attr(inode)){
+		fi->meta_id=le64_to_cpu(ri->i_meta_id);          /*index of meta block*/
+		fi->cpage_num=le64_to_cpu(ri->i_cpage_num);
+		fi->next_ino=le64_to_cpu(ri->i_next_ino);
+		fi->ori_ino=le64_to_cpu(ri->i_ori_ino);
+	}
+#endif
 	F2FS_I(inode)->i_disk_time[0] = inode->i_atime;
 	F2FS_I(inode)->i_disk_time[1] = inode->i_ctime;
 	F2FS_I(inode)->i_disk_time[2] = inode->i_mtime;
@@ -618,6 +625,12 @@ void f2fs_update_inode(struct inode *inode, struct page *node_page)
 			ri->i_log_cluster_size =
 				F2FS_I(inode)->i_log_cluster_size;
 		}
+#ifdef F2FS_MAIN_COMPRESS
+		ri->i_meta_id = cpu_to_le64(F2FS_I(inode)->meta_id);
+		ri->i_cpage_num = cpu_to_le64(F2FS_I(inode)->cpage_num);
+		ri->i_next_ino = cpu_to_le64(F2FS_I(inode)->next_ino);
+		ri->i_ori_ino = cpu_to_le64(F2FS_I(inode)->ori_ino);
+#endif
 	}
 
 	__set_inode_rdev(inode, ri);

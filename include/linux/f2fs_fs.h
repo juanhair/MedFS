@@ -13,6 +13,9 @@
 #define F2FS_DELTA_COMPRESS  //revised
 #ifdef F2FS_DELTA_COMPRESS
 #define F2FS_MAIN_COMPRESS
+#ifdef F2FS_MAIN_COMPRESS
+#define F2FS_MAIN_BGRES
+#endif
 #endif
 #define F2FS_SUPER_OFFSET		1024	/* byte-size offset */
 #define F2FS_MIN_LOG_SECTOR_SIZE	9	/* 9 bits for 512 bytes */
@@ -277,6 +280,12 @@ struct f2fs_inode {
 			__u8 i_log_cluster_size;	/* log of cluster size */
 			__le16 i_padding;		/* padding */
 			__le32 i_extra_end[0];	/* for attribute size calculation */
+#ifdef F2FS_MAIN_COMPRESS
+			__u8 i_meta_id;          /*index of meta block*/
+			__u8 i_cpage_num;
+			__le16 i_next_ino;
+			__le16 i_ori_ino;
+#endif			
 		} __packed;
 		__le32 i_addr[DEF_ADDRS_PER_INODE];	/* Pointers to data blocks */
 	};

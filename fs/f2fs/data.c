@@ -3793,8 +3793,11 @@ bool f2fs_decompress_main(struct page *page)
 	if(!inode || inode==NULL) return 0;
 	
 	new_inode=f2fs_iget(sb, F2FS_I(inode)->meta_id);
-	if (err)
+	if (IS_ERR(new_inode) || is_bad_inode(new_inode)) {
+		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
+		printk(KERN_ALERT"bad inode in decompress main:%d\n", new_inode->i_ino);
 		return 0;
+	}
 	meta_page = f2fs_read_page_for_main_compress(new_inode, 0);
 	if (!meta_page) {
 		printk(KERN_ALERT"get meta page failed:%d\n",F2FS_I(inode)->meta_id);
@@ -3882,14 +3885,14 @@ bool f2fs_store_delta_in_main(struct inode *inode, char *cbuf, int clen, block_t
 	unsigned int noffset[4];
 	int level=0, err=0;
 	int next_loc=0,next_loc1=0, target_loc=0, tmp_loc1=0, contend_flag=0;
-
+	int tmp_ino=-1;
 	struct page *meta_page=NULL, *cpage=NULL, *basepage=NULL;
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
-	struct path root;
-
 	struct super_block *sb = F2FS_I_SB(inode)->sb;
-	struct inode *new_inode1=NULL;
+	struct inode *new_inode1=NULL, *tmp_inode=NULL;
 	struct dnode_of_data *dn;
+	struct bgres_centroid *centroid=NULL;
+	
 	if(type==0){
 	/*hcluster, calc dist to centroid*/	
 		double dist1=int_sqrt((inode->i_write_time-sbi->cx1)*(inode->i_write_time-sbi->cx1)+(inode->i_read_time-sbi->cy1)*(inode->i_read_time-sbi->cy1));
@@ -3918,9 +3921,15 @@ bool f2fs_store_delta_in_main(struct inode *inode, char *cbuf, int clen, block_t
 	/*****************meta block layout**************************************/
 	/*1byte delta num in first cpage CN || 2byte free space in first cpage FS || 4byte index of first cpage PI || 4byte delta1 index....*/ 
 	/*cpage layout*/
-	/*2byte delta size || delta || ...*/	
+	/*2byte delta size || delta || ...*/
 	if(is_inode_flag_set(inode, FI_MAIN_DELTA)){
 		new_inode1=f2fs_iget(sb, F2FS_I(inode)->meta_id);
+		if (IS_ERR(new_inode1) || is_bad_inode(new_inode1) || new_inode1==NULL) {
+			clear_inode_flag(inode, FI_MAIN_DELTA);
+			F2FS_I(inode)->meta_id=-1;
+			F2FS_I(inode)->cpage_num=0;
+			goto no_maincomp_inode;
+		}
 		meta_page = f2fs_read_page_for_main_compress(new_inode1, 0);
 		if (!meta_page) {
 			printk(KERN_ALERT"get meta page failed:%d\n",F2FS_I(inode)->meta_id);
@@ -4006,6 +4015,9 @@ bool f2fs_store_delta_in_main(struct inode *inode, char *cbuf, int clen, block_t
 							for(k=0;k<PAGE_SIZE;k++) meta_addr[k]=0;
 						}
 					}
+#ifdef F2FS_MAIN_BGRES
+					F2FS_I(new_inode1)->centroid->main_compress_num--;
+#endif
 					goto insert_delta;
 				}
 				tmp_loc1=tmp_loc1+4;
@@ -4080,6 +4092,10 @@ insert_delta:
 				if (!PageUptodate(cpage)) SetPageUptodate(cpage);
 				if(PageLocked(cpage)) f2fs_put_page(cpage,1);
 				else put_page(cpage);
+				if(!is_inode_flag_set(inode, FI_MAIN_DELTA))	set_inode_flag(inode, FI_MAIN_DELTA);
+#ifdef F2FS_MAIN_BGRES
+				F2FS_I(new_inode1)->centroid->main_compress_num++;
+#endif
 				break;
 			}
 			next_loc=next_loc+2+1+4+4*delta_num_in_cpage;
@@ -4092,15 +4108,15 @@ insert_delta:
 	}
 	if(insert_flag==0)
 	{
+no_maincomp_inode:
 		if(!is_inode_flag_set(inode, FI_MAIN_DELTA))
 		{
-			printk(KERN_ALERT"test in new meta page17:%d\n",F2FS_I(inode)->meta_id);
-			//filp=file_clone_open(file);
 			new_inode1 = f2fs_new_inode(inode, S_ISGID);
 			if (IS_ERR(new_inode1))
 				return PTR_ERR(new_inode1);
 			new_inode1->i_op = &f2fs_file_inode_operations;
 			new_inode1->i_fop = &f2fs_file_operations;
+			if(new_inode1->i_mapping==NULL) printk(KERN_ALERT"null mapping in main compress:%d\n", new_inode1->i_mapping);
 			new_inode1->i_mapping->a_ops = &f2fs_dblock_aops;
 			f2fs_lock_op(sbi);
 			err = f2fs_acquire_orphan_inode(sbi);
@@ -4111,18 +4127,45 @@ insert_delta:
 				return err;
 			f2fs_add_orphan_inode(new_inode1);
 			f2fs_alloc_nid_done(sbi, new_inode1->i_ino);
-			//d_tmpfile(file->f_path.dentry, new_inode1);
 			f2fs_unlock_op(sbi);
 			unlock_new_inode(new_inode1);
-			f2fs_balance_fs(sbi, true);			
-			//filp->f_inode=new_inode1;
-//			new_inode->i_fop->open(new_inode, filp);
+			//f2fs_balance_fs(sbi, true);	
+#ifdef F2FS_MAIN_BGRES
+			sbi->bgres_lock=1;
+			spin_lock(&sbi->bgres_list_lock);
+			F2FS_I(new_inode1)->centroid->ino=new_inode1->i_ino;
+			F2FS_I(new_inode1)->centroid->i_read_time=inode->i_read_time;
+			F2FS_I(new_inode1)->centroid->i_write_time=inode->i_write_time;
+			F2FS_I(new_inode1)->ori_ino=inode->i_ino;
+			F2FS_I(new_inode1)->cpage_num=F2FS_I(inode)->cpage_num;
+			if(sbi->first_ino<0 || f2fs_check_nid_range(sbi, sbi->first_ino)) {
+				sbi->first_ino=new_inode1->i_ino;
+			}
+			else
+			{
+				tmp_ino=sbi->first_ino;
+				while(tmp_ino>=0)
+				{	
+					tmp_inode=f2fs_iget(sb, tmp_ino);
+					if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode) || tmp_inode==NULL) {
+						printk(KERN_ALERT"read tail main compress inode failed:%d\n", tmp_ino);
+						return 0;
+					}	
+					tmp_ino=F2FS_I(tmp_inode)->next_ino;			
+				}	
+				F2FS_I(tmp_inode)->next_ino=new_inode1->i_ino;
+			}
+			list_add_tail(&F2FS_I(new_inode1)->centroid->bgres_inode_list, &sbi->bgres_list);
+			spin_unlock(&sbi->bgres_list_lock);
+			sbi->bgres_lock=0;
+#endif
 			F2FS_I(inode)->meta_id=new_inode1->i_ino;
 			//alloc page alloc block
 			meta_page = __page_cache_alloc(GFP_NOFS);
 			if (!meta_page)
 				return 0;
 			meta_page->index=0;
+			meta_page->mapping=new_inode1->i_mapping;
 repeat:
 			err = add_to_page_cache_lru(meta_page, new_inode1->i_mapping, 0, GFP_NOFS);
 			if (unlikely(err)) {
@@ -4132,10 +4175,18 @@ repeat:
 					goto repeat;
 			}
 			zero_user_segment(meta_page, 0, PAGE_SIZE);
+			set_inode_flag(inode, FI_MAIN_DELTA);
 		}
 		else
 		{
-			if(new_inode1==NULL) new_inode1=f2fs_iget(sb,F2FS_I(inode)->meta_id);
+			if(new_inode1==NULL) {
+				new_inode1=f2fs_iget(sb,F2FS_I(inode)->meta_id);
+				if (IS_ERR(new_inode1) || is_bad_inode(new_inode1)) {
+					set_sbi_flag(sbi, SBI_NEED_FSCK);
+					printk(KERN_ALERT"bad inode in main compress1:%d\n", new_inode1->i_ino);
+					return 0;
+				}
+			}
 			meta_page=f2fs_read_page_for_main_compress(new_inode1, 0);
 			if(meta_page==NULL) {
 				printk(KERN_ALERT"read meta page failed\n");
@@ -4163,7 +4214,7 @@ repeat1:
 		cpage = __page_cache_alloc(GFP_NOFS);
 		if (!cpage)
 			return NULL;
-			
+		cpage->mapping=new_inode1->i_mapping;
 		cpage->index=compact_page_num+1;
 		err = add_to_page_cache_lru(cpage, new_inode1->i_mapping, compact_page_num+1, GFP_NOFS);
 		if (unlikely(err)) {
@@ -4233,7 +4284,7 @@ repeat1:
 		else put_page(meta_page);
 		cpage=f2fs_read_page_for_main_compress(new_inode1, compact_page_num);
 		if(cpage==NULL) {
-			printk(KERN_ALERT"read meta page failed\n");
+			printk(KERN_ALERT"read c page failed\n");
 			return 0;
 		}		
 		tp1=kmap(cpage);
@@ -4243,7 +4294,9 @@ repeat1:
 		if (!PageUptodate(cpage)) SetPageUptodate(cpage);
 		if(PageLocked(cpage)) f2fs_put_page(cpage,1);
 		else put_page(cpage);
-		if(!is_inode_flag_set(inode, FI_MAIN_DELTA))	set_inode_flag(inode, FI_MAIN_DELTA);
+#ifdef F2FS_MAIN_BGRES
+		F2FS_I(new_inode1)->centroid->main_compress_num++;
+#endif
 	}
 	
 writeback:
@@ -4318,18 +4371,51 @@ writeback1:
 	return 1;	
 }
 
-
-
 struct page *f2fs_read_page_for_main_compress(struct inode *inode, pgoff_t index)
 {
 	struct page *page=NULL;
 	struct f2fs_node *rn;
-	struct dnode_of_data *dn;
+	struct page *ipage;
 	__le32 *addr_array;
 	int base = 0, ret = 0, err = 0;
 	block_t blkaddr = NULL_ADDR;
-repeat:
 	if(inode==NULL||inode->i_mapping==NULL) return 0;
+	page = f2fs_pagecache_get_page(inode->i_mapping, index,
+			FGP_LOCK | FGP_WRITE | FGP_CREAT, GFP_NOFS);
+	if (!page) {
+		err = -ENOMEM;
+		printk(KERN_ALERT"get page failed in f2fs_read_page_for_main_compress\n");
+		return err;
+	}
+/*need to read from flash and decompress*/
+	if (!PageUptodate(page)) {
+		ipage = f2fs_get_node_page(F2FS_I_SB(inode), inode->i_ino);
+		if (IS_ERR(ipage)) {
+			err = PTR_ERR(ipage);
+			f2fs_put_page(page, 1);
+			printk(KERN_ALERT"cannot find ipage page in main bgres\n");
+			return err;
+		}
+		rn = F2FS_NODE(ipage);
+		if (IS_INODE(ipage) && f2fs_has_extra_attr(inode))
+			base = get_extra_isize(inode);
+		/* Get physical address of data block */
+		addr_array = blkaddr_in_node(rn);
+		blkaddr = addr_array[base + index];//problematic
+		if (!f2fs_is_valid_blkaddr(F2FS_I_SB(inode), blkaddr,
+				DATA_GENERIC_ENHANCE_READ)) {
+			err = -EFSCORRUPTED;
+			printk(KERN_ALERT"test in read page for main compress7:%d %d\n", inode->i_ino, index);
+			goto fail;
+		}
+		err = f2fs_submit_page_read(inode, page, blkaddr);
+		if (err){
+			goto fail;	
+		}
+		SetPageUptodate(page);	
+		f2fs_put_page(ipage, 1);	
+	}	
+/*	
 	page = find_get_entry(inode->i_mapping, index);
 	if (radix_tree_exceptional_entry(page))
 		page = NULL;
@@ -4337,11 +4423,6 @@ repeat:
 		goto no_page;
 		
 	if(!PageLocked(page)) lock_page(page);
-	/*if (!trylock_page(page))
-	{
-		congestion_wait(BLK_RW_ASYNC, HZ/50);
-		goto repeat;
-	}*/
 	if(!PageLocked(page)) {
 		printk(KERN_ALERT"unlock page in read page for main:%d %d\n", inode->i_ino,index);
 		congestion_wait(BLK_RW_ASYNC, HZ/50);
@@ -4370,7 +4451,6 @@ no_page:
 		if (IS_INODE(dn->node_page) && f2fs_has_extra_attr(inode))
 			base = get_extra_isize(inode);
 
-		/* Get physical address of data block */
 		addr_array = blkaddr_in_node(rn);
 		blkaddr = addr_array[base + dn->ofs_in_node];
 		if (!f2fs_is_valid_blkaddr(F2FS_I_SB(inode), blkaddr,
@@ -4385,9 +4465,10 @@ no_page:
 		}
 		SetPageUptodate(page);	
 		f2fs_put_dnode(dn);
-	}
+	}*/
 	return page;
 fail:
+	f2fs_put_page(ipage, 1);	
 	unlock_page(page);
 	printk(KERN_ALERT"get page failed in main compress:%d %d\n", inode->i_ino, index);
 	return NULL;
@@ -5552,10 +5633,10 @@ int f2fs_retrieve_delta(struct inode *inode, unsigned int ofs_in_node)
 		for(j=0;j<i;j++) tosize += delta_size_innode[j];
 		tosize+=((sizeof(__le16)+1)*i);
 		clen= delta_size_innode[i];
-		tp=kmalloc(clen, GFP_NOFS);	
-		for(j=0;j<clen;j++) cbuf[j]=dst_addr[start_loc-tosize-j];
+		tp=kmalloc(clen, GFP_NOFS);
+		for(j=0;j<clen;j++) tp[j]=dst_addr[start_loc-tosize-j];
 		printk(KERN_ALERT"test in f2fs retrieve delta:%d\n",inode->i_ino);
-		f2fs_store_delta_in_main(inode ,cbuf, clen,base_ofs_innode[i],1);	
+		f2fs_store_delta_in_main(inode ,tp, clen,base_ofs_innode[i],1);	
 	}
 
 #else
@@ -5924,7 +6005,6 @@ int f2fs_convert_inline_delta(struct dnode_of_data *dn, struct page *page)
 		printk(KERN_ALERT"lock page failed in f2fs_convert_inline_delta1:%d %d\n", dn->inode->i_ino, page->index);
 		return -1;
 	}
-	printk(KERN_ALERT"test in clear page dirty for io:%d %d\n", dn->inode->i_ino, page->index);
 	/* clear dirty state */
 	dirty = clear_page_dirty_for_io(page);
 

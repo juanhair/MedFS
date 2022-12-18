@@ -31,6 +31,9 @@
 #define F2FS_MAIN_COMPRESS
 #define META_START_BLKNO 805306368
 #endif
+#ifdef F2FS_MAIN_COMPRESS
+#define F2FS_MAIN_BGRES
+#endif
 #ifdef CONFIG_F2FS_CHECK_FS
 #define f2fs_bug_on(sbi, condition)	BUG_ON(condition)
 #else
@@ -795,6 +798,9 @@ struct f2fs_inode_info {
 #ifdef F2FS_MAIN_COMPRESS
 	int meta_id;          /*index of meta block*/
 	int cpage_num;
+	int next_ino;
+	int ori_ino;
+	struct bgres_centroid *centroid;
 #endif
 	/* for file compress */
 	u64 i_compr_blocks;			/* # of compressed blocks */
@@ -802,7 +808,16 @@ struct f2fs_inode_info {
 	unsigned char i_log_cluster_size;	/* log of cluster size */
 	unsigned int i_cluster_size;		/* cluster size */
 };
-
+#ifdef F2FS_MAIN_BGRES
+struct bgres_centroid {
+	int ino;
+	int label;
+	int main_compress_num;
+	struct list_head bgres_inode_list;
+	int i_read_time;
+	int i_write_time;
+};
+#endif
 static inline void get_extent_info(struct extent_info *ext,
 					struct f2fs_extent *i_ext)
 {
@@ -1483,7 +1498,9 @@ struct f2fs_sb_info {
 	unsigned int max_victim_search;
 	/* migration granularity of garbage collection, unit: segment */
 	unsigned int migration_granularity;
+#ifdef F2FS_MAIN_COMPRESS
 	/*centroid for kmeans*/
+	struct list_head bgres_list;
 	float cx1;
 	float cy1;
 	float cx2;
@@ -1492,7 +1509,10 @@ struct f2fs_sb_info {
 	float cy3;
 	float cx4;
 	float cy4;
-	unsigned long first_ino;
+	bool bgres_lock;
+	spinlock_t		bgres_list_lock;
+	int first_ino;
+#endif
 	/*
 	 * for stat information.
 	 * one is for the LFS mode, and the other is for the SSR mode.
@@ -3470,13 +3490,25 @@ int f2fs_gc(struct f2fs_sb_info *sbi, bool sync, bool background,
 			unsigned int segno);
 void f2fs_build_gc_manager(struct f2fs_sb_info *sbi);
 int f2fs_resize_fs(struct f2fs_sb_info *sbi, __u64 block_count);
-
+#ifdef F2FS_MAIN_BGRES
+void f2fs_decompress_bgres(struct f2fs_sb_info *sbi);
+void f2fs_kmeans_bgres(struct f2fs_sb_info *sbi);
+double f2fs_kmeans_bgres_each(struct f2fs_sb_info *sbi);
+void f2fs_cluster_bgres(struct f2fs_sb_info *sbi);
+void f2fs_update_centroid_bgres(struct f2fs_sb_info *sbi);
+void f2fs_bgres_decompress(struct inode *inode);
+void f2fs_del_inode_in_mainlist(struct f2fs_sb_info *sbi, int ino);
+int f2fs_restore_centroid(struct f2fs_sb_info *sbi, struct bgres_centroid *centroid, int ino);
+#endif
 /*
  * recovery.c
  */
 int f2fs_recover_fsync_data(struct f2fs_sb_info *sbi, bool check_only);
 bool f2fs_space_for_roll_forward(struct f2fs_sb_info *sbi);
-
+#ifdef F2FS_MAIN_BGRES
+void f2fs_recover_centroid_list(struct f2fs_sb_info *sbi);
+int f2fs_recover_maincompress_num(struct inode *inode);
+#endif
 /*
  * debug.c
  */

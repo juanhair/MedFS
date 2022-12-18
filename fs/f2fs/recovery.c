@@ -818,6 +818,72 @@ out:
 		f2fs_quota_off_umount(sbi->sb);
 #endif
 	sbi->sb->s_flags = s_flags; /* Restore SB_RDONLY status */
-
+#ifdef F2FS_MAIN_BGRES
+	f2fs_recover_centroid_list(sbi);
+#endif
 	return ret ? ret: err;
 }
+#ifdef F2FS_MAIN_BGRES
+void f2fs_recover_centroid_list(struct f2fs_sb_info *sbi)
+{
+	struct bgres_centroid *centroid;
+	int tmp_ino=sbi->first_ino;
+	int ino=-1;
+	struct inode *tmp_inode;
+	if(tmp_ino<0) return;
+
+	INIT_LIST_HEAD(&sbi->bgres_list);
+	while(tmp_ino>=0){
+		tmp_inode=f2fs_iget(sbi->sb,tmp_ino);
+		if (IS_ERR(tmp_inode) || is_bad_inode(tmp_inode)) {
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			printk(KERN_ALERT"bad inode in recover bgres list:%d\n", tmp_inode->i_ino);
+			return ;
+		}
+		centroid = kzalloc(sizeof(struct bgres_centroid), GFP_KERNEL);
+		if (!centroid) {
+			return ;
+		}
+		centroid->ino=tmp_inode->i_ino;
+		centroid->i_read_time=0;
+		centroid->i_write_time=0;
+		centroid->label=0;
+		centroid->main_compress_num=f2fs_recover_maincompress_num(tmp_inode);	
+		spin_lock(&sbi->bgres_list_lock);
+		list_add_tail(&centroid->bgres_inode_list, &sbi->bgres_list);	
+		spin_unlock(&sbi->bgres_list_lock);
+		tmp_ino=F2FS_I(tmp_inode)->next_ino;
+	}
+}
+int f2fs_recover_maincompress_num(struct inode *inode)
+{
+	int i,cdelta_num=0, next_loc, compact_page_num,delta_num_in_cpage;
+	char ff1;
+	unsigned char *meta_addr=NULL, *tp=NULL;
+	struct page *meta_page;
+	meta_page = f2fs_read_page_for_main_compress(inode, 0);
+	if (!meta_page) {
+		printk(KERN_ALERT"get meta page failed in recovery\n");
+		return 0;
+	}
+	wait_on_page_writeback(meta_page);
+	meta_addr=kmalloc(PAGE_SIZE,GFP_NOFS);
+	tp=kmap(meta_page);
+	memcpy(meta_addr,tp,PAGE_SIZE);
+	compact_page_num=F2FS_I(inode)->cpage_num;
+	next_loc=0;
+	for(i=0;i<compact_page_num;i++){//for each compact page
+		ff1=meta_addr[next_loc];
+		delta_num_in_cpage=ff1;
+		cdelta_num+=delta_num_in_cpage;
+		next_loc=next_loc+2+1+4+4*delta_num_in_cpage;
+	}
+	kunmap(meta_page);
+	if (!PageUptodate(meta_page)) SetPageUptodate(meta_page);
+	kfree(meta_addr);
+	if(PageLocked(meta_page)) f2fs_put_page(meta_page,1);
+	else put_page(meta_page);
+	return cdelta_num;
+}
+#endif
+
