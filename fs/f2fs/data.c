@@ -4785,7 +4785,7 @@ reserved  | data index |   ...stop when meets... | 1B delta sizes| 2B indexes| d
 			}
 		}
 #ifdef F2FS_MAIN_COMPRESS
-		if(delta_compress_enable==0&&clen<819&&replace_flag==1) {
+		if(delta_compress_enable==0&&clen<819&&replace_flag==1&&inode->i_blocks>5) {
 			f2fs_put_dnode(&dn);
 			main_flag=f2fs_store_delta_in_main(inode,cbuf, clen, page->index, 0);	//5page to 1 in main delta
 			set_new_dnode(&dn, inode, NULL, NULL, 0);
